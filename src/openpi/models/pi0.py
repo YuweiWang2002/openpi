@@ -26,6 +26,8 @@ class LateStrongSyncHead(nnx.Module):
         self.heads = heads
         self.head_dim = dim // heads
         self.arm_action_dim = action_dim // 2
+        self.delta_scale = nnx.Param(jnp.zeros(()))
+        self.base_head = nnx.Linear(dim, action_dim, rngs=rngs)
         self.left_proj = nnx.Linear(dim, dim, rngs=rngs)
         self.right_proj = nnx.Linear(dim, dim, rngs=rngs)
         self.pos_emb = nnx.Param(jnp.zeros((1, horizon, dim)))
@@ -60,6 +62,7 @@ class LateStrongSyncHead(nnx.Module):
         if h > self.horizon:
             raise ValueError(f"LateStrongSyncHead got horizon {h}, but was initialized for {self.horizon}.")
 
+        base = self.base_head(suffix_out)
         h_l = self.left_proj(suffix_out) + self.pos_emb.value[:, :h] + self.left_emb.value
         h_r = self.right_proj(suffix_out) + self.pos_emb.value[:, :h] + self.right_emb.value
         z = jnp.concatenate([h_l, h_r], axis=1)
@@ -68,7 +71,8 @@ class LateStrongSyncHead(nnx.Module):
         z = z + self.mlp_out(jax.nn.gelu(self.mlp_in(self._norm(z))))
 
         h_l, h_r = jnp.split(z, 2, axis=1)
-        return jnp.concatenate([self.left_head(h_l), self.right_head(h_r)], axis=-1)
+        delta = jnp.concatenate([self.left_head(h_l), self.right_head(h_r)], axis=-1)
+        return base + self.delta_scale.value * delta
 
 
 def make_attn_mask(input_mask, mask_ar):

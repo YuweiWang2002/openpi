@@ -88,6 +88,8 @@ class LateStrongSyncHead(nn.Module):
             raise ValueError(f"LateStrongSyncHead requires an even action_dim, got {action_dim}.")
         self.horizon = horizon
         self.arm_action_dim = action_dim // 2
+        self.delta_scale = nn.Parameter(torch.zeros(()))
+        self.base_head = nn.Linear(dim, action_dim)
         self.left_proj = nn.Linear(dim, dim)
         self.right_proj = nn.Linear(dim, dim)
         self.pos_emb = nn.Parameter(torch.zeros(1, horizon, dim))
@@ -109,6 +111,7 @@ class LateStrongSyncHead(nn.Module):
         if h > self.horizon:
             raise ValueError(f"LateStrongSyncHead got horizon {h}, but was initialized for {self.horizon}.")
 
+        base = self.base_head(suffix_out)
         h_l = self.left_proj(suffix_out) + self.pos_emb[:, :h] + self.left_emb
         h_r = self.right_proj(suffix_out) + self.pos_emb[:, :h] + self.right_emb
         z = torch.cat([h_l, h_r], dim=1)
@@ -119,7 +122,8 @@ class LateStrongSyncHead(nn.Module):
         z = z + self.mlp(self.norm2(z))
 
         h_l, h_r = torch.split(z, h, dim=1)
-        return torch.cat([self.left_head(h_l), self.right_head(h_r)], dim=-1)
+        delta = torch.cat([self.left_head(h_l), self.right_head(h_r)], dim=-1)
+        return base + self.delta_scale * delta
 
 
 class PI0Pytorch(nn.Module):
