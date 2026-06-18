@@ -355,9 +355,10 @@ class LeRobotLiberoDataConfig(DataConfigFactory):
         )
 
 
-def _robotwin_aloha_data(repo_id: str) -> LeRobotAlohaDataConfig:
+def _robotwin_aloha_data(repo_id: str, *, assets_dir: str | None = None) -> LeRobotAlohaDataConfig:
     return LeRobotAlohaDataConfig(
         repo_id=repo_id,
+        assets=AssetsConfig(assets_dir=assets_dir),
         base_config=DataConfig(
             prompt_from_task=True,
         ),
@@ -871,8 +872,11 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_late_strong_sync_aloha_robotwin_lift_pot",
-        model=pi0_config.Pi0Config(pi05=True, late_strong_sync=True),
-        data=_robotwin_aloha_data("lift_pot_expert"),
+        model=pi0_config.Pi0Config(pi05=True, late_strong_sync=True, late_strong_sync_action_dim=14),
+        data=_robotwin_aloha_data(
+            "lift_pot_expert",
+            assets_dir="./assets/pi05_aloha_robotwin_lift_pot",
+        ),
         batch_size=16,
         weight_loader=weight_loaders.Pi05LateStrongSyncWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params"
@@ -882,8 +886,11 @@ _CONFIGS = [
     ),
     TrainConfig(
         name="pi05_late_strong_sync_aloha_robotwin_handover_mic",
-        model=pi0_config.Pi0Config(pi05=True, late_strong_sync=True),
-        data=_robotwin_aloha_data("handover_mic_expert"),
+        model=pi0_config.Pi0Config(pi05=True, late_strong_sync=True, late_strong_sync_action_dim=14),
+        data=_robotwin_aloha_data(
+            "handover_mic_expert",
+            assets_dir="./assets/pi05_aloha_robotwin_handover_mic",
+        ),
         batch_size=16,
         weight_loader=weight_loaders.Pi05LateStrongSyncWeightLoader(
             "gs://openpi-assets/checkpoints/pi05_base/params"

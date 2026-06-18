@@ -17,15 +17,30 @@ logger = logging.getLogger("openpi")
 
 
 class LateStrongSyncHead(nnx.Module):
-    def __init__(self, dim: int, action_dim: int, horizon: int, rngs: nnx.Rngs, *, heads: int = 8, mlp_ratio: int = 4):
-        if action_dim % 2 != 0:
-            raise ValueError(f"LateStrongSyncHead requires an even action_dim, got {action_dim}.")
+    def __init__(
+        self,
+        dim: int,
+        action_dim: int,
+        horizon: int,
+        rngs: nnx.Rngs,
+        *,
+        sync_action_dim: int | None = None,
+        heads: int = 8,
+        mlp_ratio: int = 4,
+    ):
+        sync_action_dim = sync_action_dim or action_dim
+        if sync_action_dim % 2 != 0:
+            raise ValueError(f"LateStrongSyncHead requires an even sync_action_dim, got {sync_action_dim}.")
+        if sync_action_dim > action_dim:
+            raise ValueError(f"LateStrongSyncHead sync_action_dim {sync_action_dim} exceeds action_dim {action_dim}.")
         if dim % heads != 0:
             raise ValueError(f"LateStrongSyncHead dim {dim} must be divisible by heads {heads}.")
         self.horizon = horizon
+        self.action_dim = action_dim
+        self.sync_action_dim = sync_action_dim
         self.heads = heads
         self.head_dim = dim // heads
-        self.arm_action_dim = action_dim // 2
+        self.arm_action_dim = sync_action_dim // 2
         self.delta_scale = nnx.Param(jnp.zeros(()))
         self.base_head = nnx.Linear(dim, action_dim, rngs=rngs)
         self.left_proj = nnx.Linear(dim, dim, rngs=rngs)
@@ -72,6 +87,7 @@ class LateStrongSyncHead(nnx.Module):
 
         h_l, h_r = jnp.split(z, 2, axis=1)
         delta = jnp.concatenate([self.left_head(h_l), self.right_head(h_r)], axis=-1)
+        delta = jnp.pad(delta, ((0, 0), (0, 0), (0, self.action_dim - self.sync_action_dim)))
         return base + self.delta_scale.value * delta
 
 
@@ -157,7 +173,13 @@ class Pi0(_model.BaseModel):
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
         self.action_out_proj = (
-            LateStrongSyncHead(action_expert_config.width, config.action_dim, config.action_horizon, rngs=rngs)
+            LateStrongSyncHead(
+                action_expert_config.width,
+                config.action_dim,
+                config.action_horizon,
+                rngs=rngs,
+                sync_action_dim=config.late_strong_sync_action_dim,
+            )
             if config.pi05 and config.late_strong_sync
             else nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
         )

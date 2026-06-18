@@ -82,12 +82,25 @@ def make_att_2d_masks(pad_masks, att_masks):
 
 
 class LateStrongSyncHead(nn.Module):
-    def __init__(self, dim: int, action_dim: int, horizon: int, heads: int = 8, mlp_ratio: int = 4):
+    def __init__(
+        self,
+        dim: int,
+        action_dim: int,
+        horizon: int,
+        sync_action_dim: int | None = None,
+        heads: int = 8,
+        mlp_ratio: int = 4,
+    ):
         super().__init__()
-        if action_dim % 2 != 0:
-            raise ValueError(f"LateStrongSyncHead requires an even action_dim, got {action_dim}.")
+        sync_action_dim = sync_action_dim or action_dim
+        if sync_action_dim % 2 != 0:
+            raise ValueError(f"LateStrongSyncHead requires an even sync_action_dim, got {sync_action_dim}.")
+        if sync_action_dim > action_dim:
+            raise ValueError(f"LateStrongSyncHead sync_action_dim {sync_action_dim} exceeds action_dim {action_dim}.")
         self.horizon = horizon
-        self.arm_action_dim = action_dim // 2
+        self.action_dim = action_dim
+        self.sync_action_dim = sync_action_dim
+        self.arm_action_dim = sync_action_dim // 2
         self.delta_scale = nn.Parameter(torch.zeros(()))
         self.base_head = nn.Linear(dim, action_dim)
         self.left_proj = nn.Linear(dim, dim)
@@ -123,6 +136,7 @@ class LateStrongSyncHead(nn.Module):
 
         h_l, h_r = torch.split(z, h, dim=1)
         delta = torch.cat([self.left_head(h_l), self.right_head(h_r)], dim=-1)
+        delta = F.pad(delta, (0, self.action_dim - self.sync_action_dim))
         return base + self.delta_scale * delta
 
 
@@ -144,7 +158,12 @@ class PI0Pytorch(nn.Module):
 
         self.action_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
         self.action_out_proj = (
-            LateStrongSyncHead(action_expert_config.width, config.action_dim, config.action_horizon)
+            LateStrongSyncHead(
+                action_expert_config.width,
+                config.action_dim,
+                config.action_horizon,
+                sync_action_dim=config.late_strong_sync_action_dim,
+            )
             if self.pi05 and config.late_strong_sync
             else nn.Linear(action_expert_config.width, config.action_dim)
         )

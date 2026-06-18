@@ -30,6 +30,7 @@ class Pi0Config(_model.BaseModelConfig):
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
     late_strong_sync: bool = False
+    late_strong_sync_action_dim: int | None = None
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
