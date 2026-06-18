@@ -16,6 +16,61 @@ from openpi.shared import array_typing as at
 logger = logging.getLogger("openpi")
 
 
+class LateStrongSyncHead(nnx.Module):
+    def __init__(self, dim: int, action_dim: int, horizon: int, rngs: nnx.Rngs, *, heads: int = 8, mlp_ratio: int = 4):
+        if action_dim % 2 != 0:
+            raise ValueError(f"LateStrongSyncHead requires an even action_dim, got {action_dim}.")
+        if dim % heads != 0:
+            raise ValueError(f"LateStrongSyncHead dim {dim} must be divisible by heads {heads}.")
+        self.horizon = horizon
+        self.heads = heads
+        self.head_dim = dim // heads
+        self.arm_action_dim = action_dim // 2
+        self.left_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.right_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.pos_emb = nnx.Param(jnp.zeros((1, horizon, dim)))
+        self.left_emb = nnx.Param(jnp.zeros((1, 1, dim)))
+        self.right_emb = nnx.Param(jnp.zeros((1, 1, dim)))
+        self.q_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.k_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.v_proj = nnx.Linear(dim, dim, rngs=rngs)
+        self.attn_out = nnx.Linear(dim, dim, rngs=rngs)
+        self.mlp_in = nnx.Linear(dim, dim * mlp_ratio, rngs=rngs)
+        self.mlp_out = nnx.Linear(dim * mlp_ratio, dim, rngs=rngs)
+        self.left_head = nnx.Linear(dim, self.arm_action_dim, rngs=rngs)
+        self.right_head = nnx.Linear(dim, self.arm_action_dim, rngs=rngs)
+
+    def _norm(self, x):
+        mean = jnp.mean(x, axis=-1, keepdims=True)
+        var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
+        return (x - mean) * jax.lax.rsqrt(var + 1e-6)
+
+    def _attend(self, z):
+        b, t, d = z.shape
+        q = self.q_proj(z).reshape(b, t, self.heads, self.head_dim)
+        k = self.k_proj(z).reshape(b, t, self.heads, self.head_dim)
+        v = self.v_proj(z).reshape(b, t, self.heads, self.head_dim)
+        logits = jnp.einsum("bthd,bshd->bhts", q, k) * (self.head_dim**-0.5)
+        attn = jax.nn.softmax(logits, axis=-1)
+        out = jnp.einsum("bhts,bshd->bthd", attn, v).reshape(b, t, d)
+        return self.attn_out(out)
+
+    def __call__(self, suffix_out: at.Float[at.Array, "b h d"]) -> at.Float[at.Array, "b h a"]:
+        h = suffix_out.shape[1]
+        if h > self.horizon:
+            raise ValueError(f"LateStrongSyncHead got horizon {h}, but was initialized for {self.horizon}.")
+
+        h_l = self.left_proj(suffix_out) + self.pos_emb.value[:, :h] + self.left_emb.value
+        h_r = self.right_proj(suffix_out) + self.pos_emb.value[:, :h] + self.right_emb.value
+        z = jnp.concatenate([h_l, h_r], axis=1)
+
+        z = z + self._attend(self._norm(z))
+        z = z + self.mlp_out(jax.nn.gelu(self.mlp_in(self._norm(z))))
+
+        h_l, h_r = jnp.split(z, 2, axis=1)
+        return jnp.concatenate([self.left_head(h_l), self.right_head(h_r)], axis=-1)
+
+
 def make_attn_mask(input_mask, mask_ar):
     """Adapted from big_vision.
 
@@ -97,7 +152,11 @@ class Pi0(_model.BaseModel):
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-        self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        self.action_out_proj = (
+            LateStrongSyncHead(action_expert_config.width, config.action_dim, config.action_horizon, rngs=rngs)
+            if config.pi05 and config.late_strong_sync
+            else nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
+        )
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True
