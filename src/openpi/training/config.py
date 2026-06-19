@@ -862,6 +862,14 @@ _CONFIGS = [
         num_train_steps=20_000,
     ),
     TrainConfig(
+        name="pi05_aloha_robotwin_lift_pot400",
+        model=pi0_config.Pi0Config(pi05=True),
+        data=_robotwin_aloha_data("lift_pot400"),
+        batch_size=16,
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi05_base/params"),
+        wandb_enabled=False,
+        num_train_steps=20_000,
+    ),    TrainConfig(
         name="pi05_aloha_robotwin_handover_mic",
         model=pi0_config.Pi0Config(pi05=True),
         data=_robotwin_aloha_data("handover_mic_expert"),
