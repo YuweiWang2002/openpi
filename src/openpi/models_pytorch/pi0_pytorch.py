@@ -90,6 +90,8 @@ class LateStrongSyncHead(nn.Module):
         sync_action_dim: int | None = None,
         heads: int = 8,
         mlp_ratio: int = 4,
+        gate: str = "learnable_scalar",
+        gate_init: float = 0.0,
     ):
         super().__init__()
         sync_action_dim = sync_action_dim or action_dim
@@ -101,7 +103,15 @@ class LateStrongSyncHead(nn.Module):
         self.action_dim = action_dim
         self.sync_action_dim = sync_action_dim
         self.arm_action_dim = sync_action_dim // 2
-        self.delta_scale = nn.Parameter(torch.zeros(()))
+        self.gate = gate
+        if gate not in ("fixed_scalar", "learnable_scalar", "per_dim"):
+            raise ValueError(f"Unsupported LateStrongSyncHead gate: {gate}.")
+        if gate == "fixed_scalar":
+            self.register_buffer("delta_scale", torch.tensor(gate_init))
+        elif gate == "per_dim":
+            self.delta_scale = nn.Parameter(torch.full((action_dim,), gate_init))
+        else:
+            self.delta_scale = nn.Parameter(torch.tensor(gate_init))
         self.base_head = nn.Linear(dim, action_dim)
         self.left_proj = nn.Linear(dim, dim)
         self.right_proj = nn.Linear(dim, dim)
@@ -163,6 +173,8 @@ class PI0Pytorch(nn.Module):
                 config.action_dim,
                 config.action_horizon,
                 sync_action_dim=config.late_strong_sync_action_dim,
+                gate=config.late_strong_sync_gate,
+                gate_init=config.late_strong_sync_gate_init,
             )
             if self.pi05 and config.late_strong_sync
             else nn.Linear(action_expert_config.width, config.action_dim)

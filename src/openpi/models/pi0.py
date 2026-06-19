@@ -27,6 +27,8 @@ class LateStrongSyncHead(nnx.Module):
         sync_action_dim: int | None = None,
         heads: int = 8,
         mlp_ratio: int = 4,
+        gate: str = "learnable_scalar",
+        gate_init: float = 0.0,
     ):
         sync_action_dim = sync_action_dim or action_dim
         if sync_action_dim % 2 != 0:
@@ -41,7 +43,15 @@ class LateStrongSyncHead(nnx.Module):
         self.heads = heads
         self.head_dim = dim // heads
         self.arm_action_dim = sync_action_dim // 2
-        self.delta_scale = nnx.Param(jnp.zeros(()))
+        self.gate = gate
+        if gate not in ("fixed_scalar", "learnable_scalar", "per_dim"):
+            raise ValueError(f"Unsupported LateStrongSyncHead gate: {gate}.")
+        if gate == "fixed_scalar":
+            self.delta_scale = gate_init
+        elif gate == "per_dim":
+            self.delta_scale = nnx.Param(jnp.full((action_dim,), gate_init))
+        else:
+            self.delta_scale = nnx.Param(jnp.asarray(gate_init))
         self.base_head = nnx.Linear(dim, action_dim, rngs=rngs)
         self.left_proj = nnx.Linear(dim, dim, rngs=rngs)
         self.right_proj = nnx.Linear(dim, dim, rngs=rngs)
@@ -88,7 +98,10 @@ class LateStrongSyncHead(nnx.Module):
         h_l, h_r = jnp.split(z, 2, axis=1)
         delta = jnp.concatenate([self.left_head(h_l), self.right_head(h_r)], axis=-1)
         delta = jnp.pad(delta, ((0, 0), (0, 0), (0, self.action_dim - self.sync_action_dim)))
-        return base + self.delta_scale.value * delta
+        delta_scale = self.delta_scale if self.gate == "fixed_scalar" else self.delta_scale.value
+        scaled_delta = delta_scale * delta
+
+        return base + scaled_delta
 
 
 def make_attn_mask(input_mask, mask_ar):
@@ -179,6 +192,8 @@ class Pi0(_model.BaseModel):
                 config.action_horizon,
                 rngs=rngs,
                 sync_action_dim=config.late_strong_sync_action_dim,
+                gate=config.late_strong_sync_gate,
+                gate_init=config.late_strong_sync_gate_init,
             )
             if config.pi05 and config.late_strong_sync
             else nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)

@@ -31,6 +31,8 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
     late_strong_sync: bool = False
     late_strong_sync_action_dim: int | None = None
+    late_strong_sync_gate: str = "learnable_scalar"
+    late_strong_sync_gate_init: float = 0.0
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
