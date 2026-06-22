@@ -16,94 +16,6 @@ from openpi.shared import array_typing as at
 logger = logging.getLogger("openpi")
 
 
-class LateStrongSyncHead(nnx.Module):
-    def __init__(
-        self,
-        dim: int,
-        action_dim: int,
-        horizon: int,
-        rngs: nnx.Rngs,
-        *,
-        sync_action_dim: int | None = None,
-        heads: int = 8,
-        mlp_ratio: int = 4,
-        gate: str = "learnable_scalar",
-        gate_init: float = 0.0,
-    ):
-        sync_action_dim = sync_action_dim or action_dim
-        if sync_action_dim % 2 != 0:
-            raise ValueError(f"LateStrongSyncHead requires an even sync_action_dim, got {sync_action_dim}.")
-        if sync_action_dim > action_dim:
-            raise ValueError(f"LateStrongSyncHead sync_action_dim {sync_action_dim} exceeds action_dim {action_dim}.")
-        if dim % heads != 0:
-            raise ValueError(f"LateStrongSyncHead dim {dim} must be divisible by heads {heads}.")
-        self.horizon = horizon
-        self.action_dim = action_dim
-        self.sync_action_dim = sync_action_dim
-        self.heads = heads
-        self.head_dim = dim // heads
-        self.arm_action_dim = sync_action_dim // 2
-        self.gate = gate
-        if gate not in ("fixed_scalar", "learnable_scalar", "per_dim"):
-            raise ValueError(f"Unsupported LateStrongSyncHead gate: {gate}.")
-        if gate == "fixed_scalar":
-            self.delta_scale = gate_init
-        elif gate == "per_dim":
-            self.delta_scale = nnx.Param(jnp.full((action_dim,), gate_init))
-        else:
-            self.delta_scale = nnx.Param(jnp.asarray(gate_init))
-        self.base_head = nnx.Linear(dim, action_dim, rngs=rngs)
-        self.left_proj = nnx.Linear(dim, dim, rngs=rngs)
-        self.right_proj = nnx.Linear(dim, dim, rngs=rngs)
-        self.pos_emb = nnx.Param(jnp.zeros((1, horizon, dim)))
-        self.left_emb = nnx.Param(jnp.zeros((1, 1, dim)))
-        self.right_emb = nnx.Param(jnp.zeros((1, 1, dim)))
-        self.q_proj = nnx.Linear(dim, dim, rngs=rngs)
-        self.k_proj = nnx.Linear(dim, dim, rngs=rngs)
-        self.v_proj = nnx.Linear(dim, dim, rngs=rngs)
-        self.attn_out = nnx.Linear(dim, dim, rngs=rngs)
-        self.mlp_in = nnx.Linear(dim, dim * mlp_ratio, rngs=rngs)
-        self.mlp_out = nnx.Linear(dim * mlp_ratio, dim, rngs=rngs)
-        self.left_head = nnx.Linear(dim, self.arm_action_dim, rngs=rngs)
-        self.right_head = nnx.Linear(dim, self.arm_action_dim, rngs=rngs)
-
-    def _norm(self, x):
-        mean = jnp.mean(x, axis=-1, keepdims=True)
-        var = jnp.mean(jnp.square(x - mean), axis=-1, keepdims=True)
-        return (x - mean) * jax.lax.rsqrt(var + 1e-6)
-
-    def _attend(self, z):
-        b, t, d = z.shape
-        q = self.q_proj(z).reshape(b, t, self.heads, self.head_dim)
-        k = self.k_proj(z).reshape(b, t, self.heads, self.head_dim)
-        v = self.v_proj(z).reshape(b, t, self.heads, self.head_dim)
-        logits = jnp.einsum("bthd,bshd->bhts", q, k) * (self.head_dim**-0.5)
-        attn = jax.nn.softmax(logits, axis=-1)
-        out = jnp.einsum("bhts,bshd->bthd", attn, v).reshape(b, t, d)
-        return self.attn_out(out)
-
-    def __call__(self, suffix_out: at.Float[at.Array, "b h d"]) -> at.Float[at.Array, "b h a"]:
-        h = suffix_out.shape[1]
-        if h > self.horizon:
-            raise ValueError(f"LateStrongSyncHead got horizon {h}, but was initialized for {self.horizon}.")
-
-        base = self.base_head(suffix_out)
-        h_l = self.left_proj(suffix_out) + self.pos_emb.value[:, :h] + self.left_emb.value
-        h_r = self.right_proj(suffix_out) + self.pos_emb.value[:, :h] + self.right_emb.value
-        z = jnp.concatenate([h_l, h_r], axis=1)
-
-        z = z + self._attend(self._norm(z))
-        z = z + self.mlp_out(jax.nn.gelu(self.mlp_in(self._norm(z))))
-
-        h_l, h_r = jnp.split(z, 2, axis=1)
-        delta = jnp.concatenate([self.left_head(h_l), self.right_head(h_r)], axis=-1)
-        delta = jnp.pad(delta, ((0, 0), (0, 0), (0, self.action_dim - self.sync_action_dim)))
-        delta_scale = self.delta_scale if self.gate == "fixed_scalar" else self.delta_scale.value
-        scaled_delta = delta_scale * delta
-
-        return base + scaled_delta
-
-
 def make_attn_mask(input_mask, mask_ar):
     """Adapted from big_vision.
 
@@ -185,19 +97,7 @@ class Pi0(_model.BaseModel):
             self.state_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_in = nnx.Linear(2 * action_expert_config.width, action_expert_config.width, rngs=rngs)
             self.action_time_mlp_out = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
-        self.action_out_proj = (
-            LateStrongSyncHead(
-                action_expert_config.width,
-                config.action_dim,
-                config.action_horizon,
-                rngs=rngs,
-                sync_action_dim=config.late_strong_sync_action_dim,
-                gate=config.late_strong_sync_gate,
-                gate_init=config.late_strong_sync_gate_init,
-            )
-            if config.pi05 and config.late_strong_sync
-            else nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
-        )
+        self.action_out_proj = nnx.Linear(action_expert_config.width, config.action_dim, rngs=rngs)
 
         # This attribute gets automatically set by model.train() and model.eval().
         self.deterministic = True

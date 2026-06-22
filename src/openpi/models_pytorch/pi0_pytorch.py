@@ -81,75 +81,6 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks & pad_2d_masks
 
 
-class LateStrongSyncHead(nn.Module):
-    def __init__(
-        self,
-        dim: int,
-        action_dim: int,
-        horizon: int,
-        sync_action_dim: int | None = None,
-        heads: int = 8,
-        mlp_ratio: int = 4,
-        gate: str = "learnable_scalar",
-        gate_init: float = 0.0,
-    ):
-        super().__init__()
-        sync_action_dim = sync_action_dim or action_dim
-        if sync_action_dim % 2 != 0:
-            raise ValueError(f"LateStrongSyncHead requires an even sync_action_dim, got {sync_action_dim}.")
-        if sync_action_dim > action_dim:
-            raise ValueError(f"LateStrongSyncHead sync_action_dim {sync_action_dim} exceeds action_dim {action_dim}.")
-        self.horizon = horizon
-        self.action_dim = action_dim
-        self.sync_action_dim = sync_action_dim
-        self.arm_action_dim = sync_action_dim // 2
-        self.gate = gate
-        if gate not in ("fixed_scalar", "learnable_scalar", "per_dim"):
-            raise ValueError(f"Unsupported LateStrongSyncHead gate: {gate}.")
-        if gate == "fixed_scalar":
-            self.register_buffer("delta_scale", torch.tensor(gate_init))
-        elif gate == "per_dim":
-            self.delta_scale = nn.Parameter(torch.full((action_dim,), gate_init))
-        else:
-            self.delta_scale = nn.Parameter(torch.tensor(gate_init))
-        self.base_head = nn.Linear(dim, action_dim)
-        self.left_proj = nn.Linear(dim, dim)
-        self.right_proj = nn.Linear(dim, dim)
-        self.pos_emb = nn.Parameter(torch.zeros(1, horizon, dim))
-        self.left_emb = nn.Parameter(torch.zeros(1, 1, dim))
-        self.right_emb = nn.Parameter(torch.zeros(1, 1, dim))
-        self.norm1 = nn.LayerNorm(dim)
-        self.attn = nn.MultiheadAttention(dim, heads, batch_first=True)
-        self.norm2 = nn.LayerNorm(dim)
-        self.mlp = nn.Sequential(
-            nn.Linear(dim, dim * mlp_ratio),
-            nn.GELU(),
-            nn.Linear(dim * mlp_ratio, dim),
-        )
-        self.left_head = nn.Linear(dim, self.arm_action_dim)
-        self.right_head = nn.Linear(dim, self.arm_action_dim)
-
-    def forward(self, suffix_out):
-        h = suffix_out.shape[1]
-        if h > self.horizon:
-            raise ValueError(f"LateStrongSyncHead got horizon {h}, but was initialized for {self.horizon}.")
-
-        base = self.base_head(suffix_out)
-        h_l = self.left_proj(suffix_out) + self.pos_emb[:, :h] + self.left_emb
-        h_r = self.right_proj(suffix_out) + self.pos_emb[:, :h] + self.right_emb
-        z = torch.cat([h_l, h_r], dim=1)
-
-        q = self.norm1(z)
-        attn_out, _ = self.attn(q, q, q, need_weights=False)
-        z = z + attn_out
-        z = z + self.mlp(self.norm2(z))
-
-        h_l, h_r = torch.split(z, h, dim=1)
-        delta = torch.cat([self.left_head(h_l), self.right_head(h_r)], dim=-1)
-        delta = F.pad(delta, (0, self.action_dim - self.sync_action_dim))
-        return base + self.delta_scale * delta
-
-
 class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
@@ -167,18 +98,7 @@ class PI0Pytorch(nn.Module):
         )
 
         self.action_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
-        self.action_out_proj = (
-            LateStrongSyncHead(
-                action_expert_config.width,
-                config.action_dim,
-                config.action_horizon,
-                sync_action_dim=config.late_strong_sync_action_dim,
-                gate=config.late_strong_sync_gate,
-                gate_init=config.late_strong_sync_gate_init,
-            )
-            if self.pi05 and config.late_strong_sync
-            else nn.Linear(action_expert_config.width, config.action_dim)
-        )
+        self.action_out_proj = nn.Linear(action_expert_config.width, config.action_dim)
 
         if self.pi05:
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)

@@ -55,24 +55,6 @@ class CheckpointWeightLoader(WeightLoader):
 
 
 @dataclasses.dataclass(frozen=True)
-class Pi05LateStrongSyncWeightLoader(WeightLoader):
-    """Loads a standard pi05 checkpoint into the late-strong-sync action head."""
-
-    params_path: str
-
-    def load(self, params: at.Params) -> at.Params:
-        loaded_params = _model.restore_params(download.maybe_download(self.params_path), restore_type=np.ndarray)
-        flat_loaded = flax.traverse_util.flatten_dict(loaded_params, sep="/")
-        for suffix in ("kernel", "bias"):
-            old_key = f"action_out_proj/{suffix}"
-            new_key = f"action_out_proj/base_head/{suffix}"
-            if old_key in flat_loaded:
-                flat_loaded[new_key] = flat_loaded[old_key]
-        loaded_params = flax.traverse_util.unflatten_dict(flat_loaded, sep="/")
-        return _merge_params(loaded_params, params, missing_regex=".*(lora|action_out_proj).*")
-
-
-@dataclasses.dataclass(frozen=True)
 class PaliGemmaWeightLoader(WeightLoader):
     """Loads weights from the official PaliGemma checkpoint.
 
